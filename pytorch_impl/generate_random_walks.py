@@ -8,7 +8,7 @@ import numpy as np
 np.random.seed(123)
 import networkx as nx
 import node2vec
-
+import pandas as pd
 
 def read_graph(input, weighted=False, directed=False):
     '''
@@ -25,14 +25,24 @@ def read_graph(input, weighted=False, directed=False):
         G = G.to_undirected()
 
     return G
-
-def generate_random_walks(input, num_walks, walk_length):
+def read_KG(input):
+    data=pd.read_csv(input,sep='\t',names=['s','r','t'])
+    # data=data.iloc[:1000]
+    G=nx.from_pandas_edgelist(data, "s", "t", edge_attr=None, create_using=nx.DiGraph())
+    for edge in G.edges():
+        G[edge[0]][edge[1]]['weight'] = 1
+    G=G.to_undirected()
+    return G
+def generate_random_walks(input, num_walks, walk_length,kg=False):
     '''
     Pipeline for representational learning for all nodes in a graph.
     '''
-    nx_G = read_graph(input)
+    
+    if kg:
+        nx_G=read_KG(input)
+    else:
+        nx_G = read_graph(input)
     G = node2vec.Graph(nx_G, is_directed=False, p=1, q=1)  #DeepWalk
     G.preprocess_transition_probs()
     walks = G.simulate_walks(num_walks, walk_length)
-
     return np.array(walks)

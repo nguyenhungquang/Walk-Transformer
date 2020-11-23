@@ -40,17 +40,29 @@ parser.add_argument('--fold_idx', type=int, default=1, help='The fold index. 0-9
 parser.add_argument('--num_walks', type=int, default=3, help='')
 parser.add_argument('--walk_length', type=int, default=8, help='')
 args = parser.parse_args()
-
+args.dataset='train'#'freebase_mtr100_mte100-train.txt'
 print(args)
-
-walks = generate_random_walks(input='../data/'+args.dataset+'.Full.edgelist', num_walks=args.num_walks, walk_length=args.walk_length)
+args.model_name='train'
+# walks = generate_random_walks(input='../data/'+args.dataset+'.Full.edgelist', num_walks=args.num_walks, walk_length=args.walk_length)
+# walks = generate_random_walks(input='../data/fb15k/freebase_mtr100_mte100-train.txt', num_walks=args.num_walks, walk_length=args.walk_length,kg=True)
+walks = generate_random_walks(input='../data/fb15k/train', num_walks=args.num_walks, walk_length=args.walk_length,kg=True)
 data_size = np.shape(walks)[0]
-#cora,citeseer,pubmed
-with open('../data/'+args.dataset+'.128d.feature.pickle', 'rb') as f:
-    features_matrix = torch.from_numpy(cPickle.load(f)).to(device)
-vocab_size = features_matrix.size(0)
-feature_dim_size = features_matrix.size(1)
+# print(data_size)
+# print(walks.shape)
+# print(walks)
 
+#cora,citeseer,pubmed
+# with open('../data/'+args.dataset+'.128d.feature.pickle', 'rb') as f:
+#     features_matrix = torch.from_numpy(cPickle.load(f)).to(device)
+# vocab_size = features_matrix.size(0)
+# feature_dim_size = features_matrix.size(1)
+def file_len(fname):
+    with open(fname) as f:
+        for i, l in enumerate(f):
+            pass
+    return i + 1
+vocab_size=14951#file_len('../data/fb15k/entity2id.txt')
+rel_size=1345#file_len('../data/fb15k/relation2id.txt')
 class Batch_Loader_RW(object):
     def __init__(self):
 
@@ -70,34 +82,62 @@ class Batch_Loader_RW(object):
             for node in walk:
                 context_nodes.append(np.random.choice(self.dict_neighbors[node], args.num_neighbors, replace=True))
         return torch.from_numpy(walks[idxs]).to(device), torch.from_numpy(np.array(context_nodes)).view(-1).to(device)
-
-batch_loader = Batch_Loader_RW()
-
+class Batch_KB(object):
+    def __init__(self):
+        self.dict_neighbors={}
+        with open('../data/fb15k/'+args.dataset, 'r') as f:
+            for line in f:
+                trip=line.strip().split()
+                if len(trip)==3:
+                    if int(trip[0]) not in self.dict_neighbors:
+                        self.dict_neighbors[int(trip[0])]=[]
+                    if int(trip[2]) not in self.dict_neighbors:
+                        self.dict_neighbors[int(trip[2])]=[]
+                    self.dict_neighbors[int(trip[0])].append([int(trip[1]),int(trip[2])])
+                    self.dict_neighbors[int(trip[2])].append([int(trip[1]),int(trip[0])])
+    def __call__(self):
+        idxs = np.random.permutation(data_size)[:args.batch_size]
+        context_nodes = []
+        context_rels=[]
+        for walk in walks[idxs]:
+            for node in walk:
+                neighbor_nodes=np.array([i[1] for i in self.dict_neighbors[node]])
+                neighbor_rels=np.array([i[0] for i in self.dict_neighbors[node]])
+                neighbor_index=np.random.choice(range(len(self.dict_neighbors[node])), args.num_neighbors, replace=True)
+                context_nodes.append(neighbor_nodes[neighbor_index])
+                context_rels.append(neighbor_rels[neighbor_index])
+        return torch.from_numpy(walks[idxs]).to(device), torch.from_numpy(np.array(context_rels)).view(-1).to(device),torch.from_numpy(np.array(context_nodes)).view(-1).to(device)
+# batch_loader = Batch_Loader_RW()
+batch_loader = Batch_KB()
+# x,r,y=batch_loader()
+# print(x,r,y)
 print("Loading data... finished!")
-
-model = SANNE(feature_dim_size=feature_dim_size, ff_hidden_size=args.ff_hidden_size,num_heads=args.num_heads,
+model = SANNE(feature_dim_size=128,  ff_hidden_size=args.ff_hidden_size,num_heads=args.num_heads,
                 dropout=args.dropout, num_self_att_layers=args.num_self_att_layers,
-                vocab_size=vocab_size, sampled_num=args.sampled_num,initialization=features_matrix,
+                vocab_size=vocab_size, rel_size=rel_size,sampled_num=args.sampled_num,#initialization=features_matrix,
                 num_neighbors=args.num_neighbors, device=device).to(device)
 
 
 optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)  # Adagrad?
 num_batches_per_epoch = int((data_size - 1) / args.batch_size) + 1
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=num_batches_per_epoch, gamma=0.1)
-
+from torch import autograd
 def train():
     model.train() # Turn on the train mode
     total_loss = 0.
     for _ in range(num_batches_per_epoch):
-        input_x, input_y = batch_loader()
-        optimizer.zero_grad()
-        logits = model(input_x, input_y)
-        loss = torch.sum(logits)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
-        optimizer.step()
-        total_loss += loss.item()
-
+        with autograd.detect_anomaly():
+            input_x, input_r,input_y = batch_loader()
+            optimizer.zero_grad()
+            logits = model(input_x, input_r,input_y)
+            loss = torch.sum(logits)
+            if math.isnan(loss):
+                print(logits)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+            optimizer.step()
+            total_loss += loss.item()
+            # print(loss.item())
     return total_loss
 
 def evaluate(epoch, acc_write):
@@ -123,7 +163,17 @@ def evaluate(epoch, acc_write):
             acc_write.write('epoch ' + str(epoch) + ' fold_idx ' + str(fold_idx) + ' val_acc ' + str(val_acc*100.0) + ' test_acc ' + str(test_acc*100.0) + '\n')
 
     return acc_write
-
+def eval_KB():
+    # test_data=pd.read_csv('../data/fb15k/test',sep='\t',names=['s','r','t'])
+    # correct_test=0
+    # for index, row in test_data.iterrows():
+    #     correct_test+=model.hit_at_10(row['s'],row['r'],row['t'])
+    train_data=pd.read_csv('../data/fb15k/train',sep='\t',names=['s','r','t'])
+    correct_train=0
+    for index, row in train_data.iterrows():
+        correct_train+=model.hit_at_10(row['s'],row['r'],row['t'])
+    print(correct_train/len(train_data))
+    # print(correct_test/len(test_data))
 """main process"""
 import os
 out_dir = os.path.abspath(os.path.join(args.run_folder, "../runs_pytorch_SANNE", args.model_name))
@@ -141,7 +191,8 @@ for epoch in range(1, args.num_epochs + 1):
     train_loss = train()
     cost_loss.append(train_loss)
     print(train_loss)
-    acc_write = evaluate(epoch, acc_write)
+    #acc_write = evaluate(epoch, acc_write)
+    eval_KB()
     if epoch > 5 and cost_loss[-1] > np.mean(cost_loss[-6:-1]):
         scheduler.step()
 

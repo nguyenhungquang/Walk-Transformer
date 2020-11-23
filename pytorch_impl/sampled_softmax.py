@@ -14,7 +14,7 @@ if torch.cuda.is_available():
 """LogUniformSampler is taken from https://github.com/rdspring1/PyTorch_GBW_LM"""
 
 class SampledSoftmax(nn.Module):
-    def __init__(self, ntokens, nsampled, nhid, device):
+    def __init__(self, ntokens, nrels, nsampled, nhid, device):
         super(SampledSoftmax, self).__init__()
 
         # Parameters
@@ -48,14 +48,15 @@ class SampledSoftmax(nn.Module):
 
         # gather true labels
         true_weights = torch.index_select(self.weight, 0, labels)
-
         # gather sample ids
         sample_weights = torch.index_select(self.weight, 0, sample_ids)
-
+        #normalize
         # calculate logits
-        true_logits = torch.exp(torch.sum(torch.mul(inputs, true_weights), dim=1))
-        sample_logits = torch.exp(torch.matmul(inputs, torch.t(sample_weights)))
-
-        logits = -torch.log(true_logits / torch.sum(sample_logits, dim=1))
-
-        return logits
+        # true_logits = torch.exp(torch.sum(torch.mul(inputs, true_weights), dim=1))
+        # sample_logits = torch.exp(torch.matmul(inputs, torch.t(sample_weights)))
+        # logits = -torch.log(true_logits / (torch.sum(sample_logits, dim=1)))
+        normalized_true_logits = torch.exp(torch.sum(torch.mul(inputs, true_weights), dim=1)-torch.max(torch.sum(torch.mul(inputs, true_weights), dim=1)))
+        normalized_sample_logits = torch.exp(torch.matmul(inputs, torch.t(sample_weights))-torch.max(torch.sum(torch.mul(inputs, true_weights), dim=1)))
+        normalized_logits = -torch.log(normalized_true_logits / (torch.sum(normalized_sample_logits, dim=1)))
+        # print(logits,normalized_logits)
+        return normalized_logits
