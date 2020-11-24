@@ -1,4 +1,4 @@
-Dữ liệu: Em lấy 1 bộ dữ liệu freebase15k trong 1 bài out-of-knowledge, lưu trong folder fb15k. Hiện tại train và test được thực hiện trên cùng 1 tập dữ liệu là file train
+Dữ liệu: Em lấy 1 bộ dữ liệu freebase15k trong 1 bài out-of-knowledge, lưu trong folder fb15k. Hiện tại train và test được thực hiện trên cùng 1 tập dữ liệu là file train. Mỗi hàng tương ứng với 1 triple (h,r,t)
 - File generate_random_walks.py: đọc đồ thị từ dữ liệu và sinh ra các random walks.
 - File train_pytorch_SANNE.py đọc dữ liệu, train và evaluate. 
 ```
