@@ -55,13 +55,12 @@ class SampledSoftmax(nn.Module):
 
         true_dots = torch.sum(torch.mul(inputs, true_weights), dim=1, keepdim=True)
         sample_dots = torch.matmul(inputs, torch.t(sample_weights))
-        # row_max_vals = torch.max(sample_dots, dim=1, keepdim=True)[0]
         row_max_vals = torch.max(
             torch.cat([true_dots, sample_dots], dim=1), dim=1, keepdim=True
         )[0]
 
-        neg_log_llh = (row_max_vals - true_dots) + torch.log(
-            torch.sum(torch.exp(sample_dots - row_max_vals), dim=1) + 1e-10
-        )
+        numerator = true_dots - row_max_vals
+        denominator = torch.logsumexp(sample_dots - row_max_vals, dim=1, keepdim=True)
+        log_llh = numerator - denominator
 
-        return neg_log_llh
+        return -log_llh
