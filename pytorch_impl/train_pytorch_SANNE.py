@@ -52,13 +52,15 @@ parser.add_argument("--fold_idx", type=int, default=1, help="The fold index. 0-9
 parser.add_argument("--num_walks", type=int, default=3, help="")
 parser.add_argument("--walk_length", type=int, default=8, help="")
 args = parser.parse_args()
-args.dataset = "train"  #'freebase_mtr100_mte100-train.txt'
+directory = ""
+if args.dataset == 'fb':
+    directory = "numerical/"
 print(args)
-args.model_name = "train"
+
 # walks = generate_random_walks(input='../data/'+args.dataset+'.Full.edgelist', num_walks=args.num_walks, walk_length=args.walk_length)
 # walks = generate_random_walks(input='../data/fb15k/freebase_mtr100_mte100-train.txt', num_walks=args.num_walks, walk_length=args.walk_length,kg=True)
 walks = generate_random_walks(
-    input="../data/fb15k/train",
+    input="../data/fb15k/"+directory+"train.txt",
     num_walks=args.num_walks,
     walk_length=args.walk_length,
     kg=True,
@@ -115,7 +117,7 @@ class Batch_Loader_RW(object):
 class Batch_KB(object):
     def __init__(self):
         self.dict_neighbors = {}
-        with open("../data/fb15k/train", "r") as f:
+        with open("../data/fb15k/"+directory+"train.txt", "r") as f:
             for line in f:
                 trip = line.strip().split()
                 if len(trip) == 3:
@@ -256,7 +258,10 @@ def eval_KB():
     # correct_test=0
     # for index, row in test_data.iterrows():
     #     correct_test+=model.hit_at_10(row['s'],row['r'],row['t'])
-    train_data = pd.read_csv("../data/fb15k/train", sep="\t", names=["s", "r", "t"])
+    valid_f="valid.txt"
+    if args.dataset!="fb":
+        valid_f='train.txt'
+    train_data = pd.read_csv("../data/fb15k/"+directory+valid_f, sep="\t", names=["s", "r", "t"])
     correct_train = 0
     progress=tqdm(
         enumerate(train_data.itertuples(index=False)), desc="Evaluating...", total=len(train_data)
@@ -266,7 +271,7 @@ def eval_KB():
         progress.set_description("Hit@10: %2.5f"%(correct_train/(i+1)))
     print(correct_train / len(train_data))
     # print(correct_test/len(test_data))
-model.load_state_dict(torch.load('model.pt'))
+# model.load_state_dict(torch.load('model.pt'))
 # eval_KB()
 # assert False
 

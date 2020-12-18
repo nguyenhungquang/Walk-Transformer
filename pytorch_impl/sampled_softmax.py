@@ -68,10 +68,10 @@ class SampledSoftmax(nn.Module):
 
         #transe loss
         true_logits = torch.exp(torch.norm(inputs-true_weights,dim=1))
-        sample_logits = torch.Tensor(batch_size)
-        for i in range(batch_size):
-            sample_logits=torch.sum(torch.exp(torch.norm(inputs[i]-sample_weights,dim=1)))
-        
+        inputs=inputs.unsqueeze(1)#view(-1,1,128)
+        sample_weights=sample_weights.unsqueeze(0)#view(1,-1,128)
+        sample_logits=torch.sum(torch.exp(torch.norm(inputs-sample_weights,dim=-1)).squeeze(),dim=1)
+
         logits = torch.log(true_logits / sample_logits)
         # print(true_logits.shape,sample_logits.shape,logits.shape)
         return logits
