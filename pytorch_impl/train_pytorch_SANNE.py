@@ -115,7 +115,7 @@ class Batch_Loader_RW(object):
 class Batch_KB(object):
     def __init__(self):
         self.dict_neighbors = {}
-        with open("../data/fb15k/" + args.dataset, "r") as f:
+        with open("../data/fb15k/train", "r") as f:
             for line in f:
                 trip = line.strip().split()
                 if len(trip) == 3:
@@ -170,7 +170,6 @@ model = SANNE(
     device=device,
 ).to(device)
 
-
 optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)  # Adagrad?
 num_batches_per_epoch = int((data_size - 1) / args.batch_size) + 1
 scheduler = torch.optim.lr_scheduler.StepLR(
@@ -184,19 +183,18 @@ def train():
     total_loss = 0.0
     iterator = trange(num_batches_per_epoch)
     for _ in iterator:
-        with autograd.detect_anomaly():
-            input_x, input_r, input_y = batch_loader()
-            optimizer.zero_grad()
-            logits = model(input_x, input_r, input_y)
-            loss = torch.sum(logits)
-            if math.isnan(loss):
-                print(logits)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
-            optimizer.step()
-            total_loss += loss.item()
-            # print(loss.item())
-            iterator.set_description("Training... (loss=%2.5f)" % loss.item())
+        input_x, input_r, input_y = batch_loader()
+        optimizer.zero_grad()
+        logits = model(input_x, input_r, input_y)
+        loss = torch.sum(logits)
+        if math.isnan(loss):
+            print(logits)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+        optimizer.step()
+        total_loss += loss.item()
+        # print(loss.item())
+        iterator.set_description("Training... (loss=%2.5f)" % loss.item())
         # break
     return total_loss
 
@@ -260,13 +258,17 @@ def eval_KB():
     #     correct_test+=model.hit_at_10(row['s'],row['r'],row['t'])
     train_data = pd.read_csv("../data/fb15k/train", sep="\t", names=["s", "r", "t"])
     correct_train = 0
-    for row in tqdm(
-        train_data.itertuples(index=False), desc="Evaluating...", total=len(train_data)
-    ):
+    progress=tqdm(
+        enumerate(train_data.itertuples(index=False)), desc="Evaluating...", total=len(train_data)
+    )
+    for i,row in progress:
         correct_train += model.hit_at_10(*row, device=device)
+        progress.set_description("Hit@10: %2.5f"%(correct_train/(i+1)))
     print(correct_train / len(train_data))
     # print(correct_test/len(test_data))
-
+model.load_state_dict(torch.load('model.pt'))
+# eval_KB()
+# assert False
 
 """main process"""
 import os
@@ -289,6 +291,9 @@ for epoch in range(1, args.num_epochs + 1):
     cost_loss.append(train_loss)
     print(train_loss)
     # acc_write = evaluate(epoch, acc_write)
+    
+    if epoch ==1:
+        torch.save(model.state_dict(), 'model.pt')
     eval_KB()
     if epoch > 5 and cost_loss[-1] > np.mean(cost_loss[-6:-1]):
         scheduler.step()

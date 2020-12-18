@@ -45,22 +45,33 @@ class SampledSoftmax(nn.Module):
 
         batch_size, d = inputs.size()
         sample_ids, true_freq, sample_freq = sample_values
-
         sample_ids = Variable(torch.LongTensor(sample_ids)).to(self.device)
-
         # gather true labels
         true_weights = torch.index_select(self.weight, 0, labels)
+        # true_weights=F.normalize(true_weights,dim=-1)
         # gather sample ids
         sample_weights = torch.index_select(self.weight, 0, sample_ids)
+        # sample_weights = F.normalize(sample_weights,dim=-1)
 
-        true_dots = torch.sum(torch.mul(inputs, true_weights), dim=1, keepdim=True)
-        sample_dots = torch.matmul(inputs, torch.t(sample_weights))
-        row_max_vals = torch.max(
-            torch.cat([true_dots, sample_dots], dim=1), dim=1, keepdim=True
-        )[0]
+        #original
+        # true_dots = torch.sum(torch.mul(inputs, true_weights), dim=1, keepdim=True)
+        # sample_dots = torch.matmul(inputs, torch.t(sample_weights))
+        # row_max_vals = torch.max(
+        #     torch.cat([true_dots, sample_dots], dim=1), dim=1, keepdim=True
+        # )[0]
 
-        numerator = true_dots - row_max_vals
-        denominator = torch.logsumexp(sample_dots - row_max_vals, dim=1, keepdim=True)
-        log_llh = numerator - denominator
+        # numerator = true_dots - row_max_vals
+        # denominator = torch.logsumexp(sample_dots - row_max_vals, dim=1, keepdim=True)
+        # log_llh = numerator - denominator
 
-        return -log_llh
+        # return -log_llh
+
+        #transe loss
+        true_logits = torch.exp(torch.norm(inputs-true_weights,dim=1))
+        sample_logits = torch.Tensor(batch_size)
+        for i in range(batch_size):
+            sample_logits=torch.sum(torch.exp(torch.norm(inputs[i]-sample_weights,dim=1)))
+        
+        logits = torch.log(true_logits / sample_logits)
+        # print(true_logits.shape,sample_logits.shape,logits.shape)
+        return logits
