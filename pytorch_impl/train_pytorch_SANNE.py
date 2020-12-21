@@ -52,7 +52,7 @@ parser.add_argument("--fold_idx", type=int, default=1, help="The fold index. 0-9
 parser.add_argument("--num_walks", type=int, default=3, help="")
 parser.add_argument("--walk_length", type=int, default=8, help="")
 args = parser.parse_args()
-directory = ""
+directory = "toy"
 if args.dataset == 'fb':
     directory = "numerical/"
 print(args)
@@ -258,10 +258,7 @@ def eval_KB():
     # correct_test=0
     # for index, row in test_data.iterrows():
     #     correct_test+=model.hit_at_10(row['s'],row['r'],row['t'])
-    valid_f="valid.txt"
-    if args.dataset!="fb":
-        valid_f='train.txt'
-    train_data = pd.read_csv("../data/fb15k/"+directory+valid_f, sep="\t", names=["s", "r", "t"])
+    train_data = pd.read_csv("../data/fb15k/"+directory+'test.txt', sep="\t", names=["s", "r", "t"])
     correct_train = 0
     progress=tqdm(
         enumerate(train_data.itertuples(index=False)), desc="Evaluating...", total=len(train_data)
