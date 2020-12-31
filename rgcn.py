@@ -17,13 +17,13 @@ e_size=6884
 r_size=990
 dim_size=128
 batch_size=2048
-lr=0.005
+lr=0.01
 class Encoder(nn.Module):
     def __init__(self):
         super(Encoder, self).__init__()
         self.emb=nn.Embedding(e_size,dim_size)
-        self.conv1 = RGCNConv(in_channels=dim_size, out_channels=64,num_relations= r_size,num_bases=2)
-        self.conv2 = RGCNConv(in_channels=64, out_channels=dim_size,num_relations= r_size,num_blocks=4)
+        self.conv1 = RGCNConv(in_channels=dim_size, out_channels=dim_size,num_relations= r_size,num_bases=2)
+        self.conv2 = RGCNConv(in_channels=dim_size, out_channels=dim_size,num_relations= r_size,num_blocks=4)
     def forward(self, edge_index, edge_type):
         x = F.relu(self.conv1(self.emb(torch.arange(e_size).to(device)), edge_index, edge_type))
         x = F.relu(self.conv2(x, edge_index, edge_type))
@@ -35,23 +35,13 @@ class Decoder(torch.nn.Module):
         self.feature_dim_size=feature_dim_size
         self.rel=nn.Embedding(self.rel_size, self.feature_dim_size)
         self.criterion=nn.MarginRankingLoss(1.0)
-        # self.rel=nn.Parameter(torch.Tensor(self.rel_size,self.feature_dim_size,self.feature_dim_size))
     def forward(self, node_embs,edge_index,edge_type):
-        pos_edge_type=edge_type#torch.index_select(edge_type,1,pos_index)
-        pos_edge_index=edge_index#torch.index_select(edge_index,1,pos_index)
-        self.neg_num=pos_edge_type.shape[-1]
-        #neg sample all
-        # neg_edge_index=torch.randint(low=0,high=e_size,size=(2,self.neg_num),device=device)
-        # neg_edge_type=torch.randint(low=0,high=r_size,size=[self.neg_num],device=device)
-        #neg sample tail
-        # neg_edge_index=torch.LongTensor(*pos_edge_index.shape).to(device)
-        # neg_edge_index[0]=pos_edge_index[0]
-        # neg_edge_index[1]=torch.randint(low=0,high=r_size,size=[self.neg_num]).to(device)
-        # neg_edge_type=pos_edge_type
-        #neg sample ht
-        neg_edge_index=torch.randint(low=0,high=e_size,size=(2,self.neg_num)).to(device)
-        neg_edge_type=pos_edge_type
-
+        pos_edge_type=edge_type
+        pos_edge_index=edge_index
+        pos_triplets=torch.cat((pos_edge_index[:1],pos_edge_type,pos_edge_index[1:]),dim=0)
+        corrupted_list=(0,2)
+        neg_triplets=self.sampling(pos_triplets,corrupted_list)
+        neg_edge_index,neg_edge_type=neg_triplets[[0,2]],neg_triplets[1]
         pos=self.score(node_embs,pos_edge_type,pos_edge_index)
         neg=self.score(node_embs,neg_edge_type,neg_edge_index)
         # pos=torch.log(pos)
@@ -65,6 +55,16 @@ class Decoder(torch.nn.Module):
         rel=self.rel(edge_type).squeeze()
         out=src+rel-tgt
         return torch.norm(out,dim=1)
+    def sampling(self,pos_triplets,corrupted_list):
+        neg_triplets=pos_triplets.clone()
+        batch_size=pos_triplets.shape[-1]
+        split_size=batch_size//len(corrupted_list)
+        for i,start in zip(corrupted_list,range(0,batch_size,split_size)):
+            stop=min(start+split_size,batch_size)
+            id_max=r_size-1 if i==1 else e_size-1
+            neg_triplets[i,start:stop]=torch.randint(high=id_max,size=[stop-start],device=device)
+            neg_triplets[i,start:stop]+=(neg_triplets[i,start:stop]>=pos_triplets[i,start:stop]).long()
+        return neg_triplets
 class Net(nn.Module):
     def __init__(self,rel_size=r_size,feature_dim_size=dim_size):
         super(Net,self).__init__()
