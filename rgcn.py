@@ -1,10 +1,19 @@
 import torch.nn as nn
 import torch
 from torch_geometric.nn import RGCNConv, FastRGCNConv,GCNConv
+from torch_geometric.data import Data, ClusterLoader, ClusterData, GraphSAINTEdgeSampler
 from torch.functional import F
 import numpy as np
 from tqdm import tqdm, trange
 import pandas as pd
+from argparse import ArgumentParser
+from rule import *
+parser = ArgumentParser("rgcn")
+parser.add_argument("--dim_size",default=128,type=int)
+parser.add_argument("--lr",default=0.01,type=float)
+parser.add_argument("--batch_size",default=2048,type=int)
+args = parser.parse_args()
+
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(device)
 train=pd.read_csv('data/fb15k/toy/train.txt',sep='\t',names=['h','r','t'])
@@ -15,9 +24,14 @@ test_edge_index=torch.tensor([np.array(test['h']),np.array(test['t'])]).to(devic
 test_edge_type=torch.tensor(list(test['r'])).to(device)
 e_size=6884
 r_size=990
-dim_size=128
-batch_size=2048
-lr=0.01
+dim_size=args.dim_size
+batch_size=args.batch_size
+lr=args.lr
+#rule powered
+rule=Rule(train)
+rule.transitivity_rule(0.25)
+# train_rule=torch.tensor([i[0] for i in rule.trans_data.values()]).to(device)
+#rgcn
 class Encoder(nn.Module):
     def __init__(self):
         super(Encoder, self).__init__()
@@ -53,6 +67,7 @@ class Decoder(torch.nn.Module):
         src=torch.index_select(node_embs,0,edge_index[0])
         tgt=torch.index_select(node_embs,0,edge_index[1])
         rel=self.rel(edge_type).squeeze()
+        rel=F.normalize(rel,p=2,dim=1)
         out=src+rel-tgt
         return torch.norm(out,dim=1)
     def sampling(self,pos_triplets,corrupted_list):
@@ -71,11 +86,39 @@ class Net(nn.Module):
         self.encoder=Encoder()
         # self.encoder=nn.Parameter(torch.rand(e_size,dim_size))
         self.decoder=Decoder(rel_size=r_size,feature_dim_size=dim_size)
-    def forward(self,total_index,total_type,edge_index,edge_type):
+    def forward(self,total_index,total_type,edge_index,edge_type,rule=None):
         node_embs=self.encoder(total_index,total_type)
         # node_embs=self.encoder
+        # node_embs=F.normalize(node_embs,p=2,dim=1)
+        # if rule.nelement() != 0:
+        #     r_score=self.rule_loss(node_embs,rule)
+        # else:
+        #     r_score=0
         score=self.decoder(node_embs,edge_index,edge_type.unsqueeze(0))
+        # print(score,r_score)
+        return score#+r_score
+    def rule_score(self,node_embs,rule):
+        h=rule[:,:,0]
+        t=rule[:,:,1]
+        r=rule[:,:,2]
+        s=h.shape
+        h=torch.index_select(node_embs,0,h.flatten()).view(*s,dim_size)
+        t=torch.index_select(node_embs,0,t.flatten()).view(*s,dim_size)
+        r=self.decoder.rel(r)
+        r=F.normalize(r,p=2,dim=2)
+        trip=h+r-t
+        score=torch.norm(trip[:,0]*trip[:,1]-trip[:,2],dim=1)
         return score
+    def rule_loss(self,node_embs,rule):
+        neg_rule=self.generate_neg_rule(rule)
+        pos=self.rule_score(node_embs,rule)
+        neg=self.rule_score(node_embs,neg_rule)
+        loss=nn.MarginRankingLoss(1)
+        return loss(pos,neg,torch.tensor([-1],device=device))
+    def generate_neg_rule(self,rule):
+        rule[:,:,0]=torch.randint(high=e_size,size=rule[:,:,0].shape,device=device)
+        rule[:,:,1]=torch.randint(high=e_size,size=rule[:,:,1].shape,device=device)
+        return rule
     def hit_at_10(self,edge_index,edge_type,src,rel,tgt):
         node_embs=self.encoder(edge_index,edge_type)
         src=torch.index_select(node_embs,0,src)
@@ -85,22 +128,31 @@ class Net(nn.Module):
         out=src+rel
         dist=torch.cdist(out,node_embs)
         id=torch.argsort(dist,axis=-1)[:,:10]
-        cnt=torch.sum(torch.tensor([int(tgt[i]) in id[i] for i in range(len(tgt))],device=device))
+        cnt=torch.sum((tgt.unsqueeze(1)==id))
+        # cnt=torch.sum(torch.tensor([int(tgt[i]) in id[i] for i in range(len(tgt))],device=device))
         # print(cnt)
         return float(cnt/len(rel))
+#train
 model=Net().to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=0.0005)
 def train():
     model.train()
     l=train_edge_index.shape[-1]
     perm=torch.randperm(l)
+    # l_rule=train_rule.shape[0]
+    # perm_rule=torch.randperm(l_rule)
+    # r_i=0
+    # r_batch_size=l_rule//(l//batch_size+1)
     total_loss=0
     for i in range(0,l,batch_size):
         optimizer.zero_grad()
         ind=perm[i:i+batch_size]
         batch_index=train_edge_index[:,ind]
         batch_type=train_edge_type[ind]
-        out = model(train_edge_index,train_edge_type,batch_index,batch_type)
+        # ind_rule=perm_rule[r_i:r_i+r_batch_size]
+        # r_i+=r_batch_size
+        # batch_rule=train_rule[ind_rule]
+        out = model(train_edge_index,train_edge_type,batch_index,batch_type)#,batch_rule)
         loss = out
         loss.backward()
         optimizer.step()
@@ -112,7 +164,8 @@ def evaluate():
     print(score)
     return score
 for epoch in range(5001):
-    print('Epoch: ',epoch)
     loss = train()
-    print(loss)
-    score=evaluate()
+    if epoch%1==0:
+        print('Epoch: ',epoch)
+        print(loss)
+        score=evaluate()
