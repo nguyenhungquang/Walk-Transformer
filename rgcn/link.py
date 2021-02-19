@@ -44,7 +44,7 @@ class RGCN(BaseRGCN):
                 dropout=self.dropout)
 
 class LinkPredict(nn.Module):
-    def __init__(self, in_dim, h_dim, num_rels, num_bases=-1,
+    def __init__(self, in_dim, h_dim, num_rels, k_hops=3, num_bases=-1,
                  num_hidden_layers=1, dropout=0, use_cuda=False, reg_param=0):
         super(LinkPredict, self).__init__()
         self.h_dim=h_dim
@@ -54,27 +54,40 @@ class LinkPredict(nn.Module):
         self.w_relation = nn.Parameter(torch.Tensor(num_rels, h_dim))
         nn.init.xavier_uniform_(self.w_relation,
                                 gain=nn.init.calculate_gain('relu'))
+        self.num_hops=k_hops
         #convkb
         self.out_channels=32
-        self.conv= nn.Conv1d(3, self.out_channels, 1)  # kernel size x 3
-        self.activation = nn.Tanh() # you should also tune with torch.tanh() or torch.nn.Tanh()
+        self.conv= nn.Conv1d(4, self.out_channels, 1)  # kernel size x 3
+        self.activation = nn.Tanh() 
         self.fc_layer = nn.Linear(h_dim * self.out_channels, 1, bias=False)
-    def calc_score(self, embedding, triplets):
+    def calc_score(self, g, embedding, triplets):
         # DistMult
         s = embedding[triplets[:,0]]
         r = self.w_relation[triplets[:,1]]
         o = embedding[triplets[:,2]]
         # score = torch.sum(s * r * o, dim=1)
+        #subgraph readout
+        readout=self.subgraph_readout(g, embedding, triplets[:,0].squeeze(),triplets[:,2].squeeze())
         #convkb
         s=s.unsqueeze(1)
         r=r.unsqueeze(1)
         o=o.unsqueeze(1)
-        conv_input = torch.cat([s, r, o], 1)
+        readout=readout.unsqueeze(1)
+        conv_input = torch.cat([s, r, o,readout], 1)
         out_conv= self.conv(conv_input)
         out_conv=self.activation(out_conv)
         in_fc=out_conv.view(-1,self.h_dim*self.out_channels)
         score = self.fc_layer(in_fc).view(-1)
         return -score
+
+    def subgraph_readout(self, g, embedding, src, tgt):
+        adj=g.adjacency_matrix_scipy()
+        batch=[]
+        for s,t in zip(src,tgt):
+            nodes, _, _, _, _=utils.k_hop_subgraph(int(s),int(t),self.num_hops, adj)
+            mean_emb=torch.mean(embedding[nodes],0)
+            batch.append(mean_emb)
+        return torch.stack(batch)
 
     def forward(self, g, h, r, norm):
         return self.rgcn.forward(g, h, r, norm)
@@ -85,7 +98,7 @@ class LinkPredict(nn.Module):
     def get_loss(self, g, embed, triplets, labels):
         # triplets is a list of data samples (positive and negative)
         # each row in the triplets is a 3-tuple of (source, relation, destination)
-        score = self.calc_score(embed, triplets)
+        score = self.calc_score(g, embed, triplets)
         predict_loss = F.binary_cross_entropy_with_logits(score, labels)
         reg_loss = self.regularization_loss(embed)
         return predict_loss + self.reg_param * reg_loss
@@ -99,7 +112,7 @@ def node_norm_to_edge_norm(g, node_norm):
 
 def main(args):
     # load graph data
-    data = load_data(args.dataset)
+    #data = load_data(args.dataset)
     num_nodes = 6884#data.num_nodes
     # train_data = data.train
     # valid_data = data.valid
@@ -116,7 +129,7 @@ def main(args):
     if use_cuda:
         torch.cuda.set_device(args.gpu)
 
-    # create model
+    # create modelf
     model = LinkPredict(num_nodes,
                         args.n_hidden,
                         num_rels,
@@ -124,7 +137,7 @@ def main(args):
                         num_hidden_layers=args.n_layers,
                         dropout=args.dropout,
                         use_cuda=use_cuda,
-                        reg_param=args.regularization)
+                        reg_param=args.regularization,k_hops=args.k_hops)
 
     # validation and testing triplets
     valid_data = torch.LongTensor(valid_data)
@@ -218,7 +231,7 @@ def main(args):
             #     best_mrr = mrr
             #     torch.save({'state_dict': model.state_dict(), 'epoch': epoch},
             #                model_state_file)
-            utils.hitat10(embed, model.w_relation, test_data, args.eval_batch_size, model=model)
+            utils.hitat10(test_graph, embed, model.w_relation, test_data, args.eval_batch_size, model=model)
             if use_cuda:
                 model.cuda()
 
@@ -274,6 +287,8 @@ if __name__ == '__main__':
             help="perform evaluation every n epochs")
     parser.add_argument("--edge-sampler", type=str, default="uniform",
             help="type of edge sampler: 'uniform' or 'neighbor'")
+    parser.add_argument("--k-hops", type=int, default=3,
+            help="number of hops in enclosing subgraph")
 
     args = parser.parse_args()
     print(args)

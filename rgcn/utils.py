@@ -12,12 +12,62 @@ import torch
 from torch.multiprocessing import Queue
 import dgl
 from tqdm import trange
+import random
 #######################################################################
 #
 # Utility function for building training and testing graphs
 #
 #######################################################################
 
+def neighbors(fringe, A, outgoing=True):
+    # Find all 1-hop neighbors of nodes in fringe from graph A, 
+    # where A is a scipy csr adjacency matrix.
+    # If outgoing=True, find neighbors with outgoing edges;
+    # otherwise, find neighbors with incoming edges (you should
+    # provide a csc matrix in this case).
+    if outgoing:
+        res = set(A[list(fringe)].indices)
+    else:
+        res = set(A[:, list(fringe)].indices)
+
+    return res
+def k_hop_subgraph(src, dst, num_hops, A, sample_ratio=1.0, 
+                   max_nodes_per_hop=None, node_features=None, 
+                   y=1, directed=False, A_csc=None):
+    # Extract the k-hop enclosing subgraph around link (src, dst) from A. 
+    nodes = [src, dst]
+    dists = [0, 0]
+    visited = set([src, dst])
+    fringe = set([src, dst])
+    for dist in range(1, num_hops+1):
+        if not directed:
+            fringe = neighbors(fringe, A)
+        else:
+            out_neighbors = neighbors(fringe, A)
+            in_neighbors = neighbors(fringe, A_csc, False)
+            fringe = out_neighbors.union(in_neighbors)
+        fringe = fringe - visited
+        visited = visited.union(fringe)
+        if sample_ratio < 1.0:
+            fringe = random.sample(fringe, int(sample_ratio*len(fringe)))
+        if max_nodes_per_hop is not None:
+            if max_nodes_per_hop < len(fringe):
+                fringe = random.sample(fringe, max_nodes_per_hop)
+        if len(fringe) == 0:
+            break
+        nodes = nodes + list(fringe)
+        dists = dists + [dist] * len(fringe)
+    subgraph = A[nodes, :][:, nodes]
+
+    # Remove target link between the subgraph.
+    subgraph[0, 1] = 0
+    subgraph[1, 0] = 0
+
+    if node_features is not None:
+        node_features = node_features[nodes]
+
+    return nodes, subgraph, dists, node_features, y
+    
 def get_adj_and_degrees(num_nodes, triplets):
     """ Get adjacency list and degrees of the graph
     """
@@ -171,7 +221,7 @@ def negative_sampling(pos_samples, num_entity, negative_rate):
 #
 #######################################################################
 
-def hitat10(embedding, w, test, batch_size=1,model=None):
+def hitat10(g, embedding, w, test, batch_size=1,model=None):
     """ Perturb one element in the triplets
     """
     a=test[:,0]
@@ -182,7 +232,7 @@ def hitat10(embedding, w, test, batch_size=1,model=None):
     num_ent=embedding.shape[0]
     ents=torch.arange(num_ent)
     n_batch=500
-    iterator=trange(n_batch)
+    iterator=trange(0,n_batch,batch_size)
     correct=0
     for idx in iterator:
         batch_start = idx * batch_size
@@ -194,12 +244,13 @@ def hitat10(embedding, w, test, batch_size=1,model=None):
         batch_r=batch_r.repeat_interleave(num_ent).unsqueeze(1)
         batch_ents=ents.repeat(b_size).unsqueeze(1)
         batch_input=torch.cat([batch_a,batch_r,batch_ents],dim=1)
-        score=model.calc_score(embedding,batch_input)
-        score=score.squeeze()
-        target = b[batch_start: batch_end]
+        score=model.calc_score(g, embedding,batch_input)
+        score=score.view(batch_size,-1)
+        target = b[batch_start: batch_end].unsqueeze(1)
         rank=torch.argsort(score)
-        if target in rank[-10:]:
-            correct+=1
+        # if target in rank[-10:]:
+        #     correct+=1
+        correct+=int(torch.count_nonzero((target==rank[:,-10:]).sum(dim=1)))
         hit=correct/(idx+1)
         iterator.set_description("Hit @ 10: %.5f"%hit)
 def sort_and_rank(score, target):
