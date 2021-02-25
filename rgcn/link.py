@@ -10,9 +10,10 @@ Difference compared to MichSchli/RelationPrediction
   among immediate neighbors. User could specify "--edge-sampler=neighbor" to switch
   to neighbor-based edge sampling.
 """
-
+from tqdm import tqdm
 import argparse
 import numpy as np
+import pickle
 import time
 import torch
 import torch.nn as nn
@@ -24,7 +25,10 @@ import pandas as pd
 from model import BaseRGCN
 
 import utils
-
+max_nodes=180
+with open('3_neighbors.txt', 'rb') as handle:
+    neighbors = pickle.loads(handle.read())
+    
 class EmbeddingLayer(nn.Module):
     def __init__(self, num_nodes, h_dim):
         super(EmbeddingLayer, self).__init__()
@@ -44,7 +48,7 @@ class RGCN(BaseRGCN):
                 dropout=self.dropout)
 
 class LinkPredict(nn.Module):
-    def __init__(self, in_dim, h_dim, num_rels, k_hops=3, num_bases=-1,
+    def __init__(self, in_dim, h_dim, num_rels, num_bases=-1,
                  num_hidden_layers=1, dropout=0, use_cuda=False, reg_param=0):
         super(LinkPredict, self).__init__()
         self.h_dim=h_dim
@@ -54,20 +58,19 @@ class LinkPredict(nn.Module):
         self.w_relation = nn.Parameter(torch.Tensor(num_rels, h_dim))
         nn.init.xavier_uniform_(self.w_relation,
                                 gain=nn.init.calculate_gain('relu'))
-        self.num_hops=k_hops
         #convkb
         self.out_channels=32
         self.conv= nn.Conv1d(4, self.out_channels, 1)  # kernel size x 3
         self.activation = nn.Tanh() 
         self.fc_layer = nn.Linear(h_dim * self.out_channels, 1, bias=False)
-    def calc_score(self, g, embedding, triplets):
+    def calc_score(self, g, h, embedding, triplets):
         # DistMult
         s = embedding[triplets[:,0]]
         r = self.w_relation[triplets[:,1]]
         o = embedding[triplets[:,2]]
         # score = torch.sum(s * r * o, dim=1)
         #subgraph readout
-        readout=self.subgraph_readout(g, embedding, triplets[:,0].squeeze(),triplets[:,2].squeeze())
+        readout=self.subgraph_readout(g, h, embedding, triplets[:,0].squeeze(),triplets[:,2].squeeze())
         #convkb
         s=s.unsqueeze(1)
         r=r.unsqueeze(1)
@@ -80,14 +83,25 @@ class LinkPredict(nn.Module):
         score = self.fc_layer(in_fc).view(-1)
         return -score
 
-    def subgraph_readout(self, g, embedding, src, tgt):
-        adj=g.adjacency_matrix_scipy()
+    def subgraph_readout(self, g, h, embedding, src, tgt):
+        adj=g.adjacency_matrix(scipy_fmt='csr')
         batch=[]
+        h=h.squeeze().cpu()
+        batch_size=src.shape[0]
+        ind=torch.zeros(batch_size,args.max_subgraph_size,dtype=int)
+        i=0
         for s,t in zip(src,tgt):
-            nodes, _, _, _, _=utils.k_hop_subgraph(int(s),int(t),self.num_hops, adj)
-            mean_emb=torch.mean(embedding[nodes],0)
-            batch.append(mean_emb)
-        return torch.stack(batch)
+            # nodes, _, _, _, _=utils.k_hop_subgraph(int(s),int(t),self.num_hops, adj)
+            nodes=list(neighbors[int(s)]&neighbors[int(t)])
+            nodes=np.intersect1d(nodes,h)
+            local_nodes=np.searchsorted(h,nodes)
+            # mean_emb=torch.mean(embedding[local_nodes],0)
+            # batch.append(mean_emb)
+            ind[i,:len(local_nodes)]=local_nodes
+            i+=1
+        subgraph_emb=embedding[ind]
+        readout_emb=subgraph_emb.sum(axis=1) / (subgraph_emb.sum(axis=2) > 0).sum(axis=1).view(-1,1).float()
+        return readout_emb
 
     def forward(self, g, h, r, norm):
         return self.rgcn.forward(g, h, r, norm)
@@ -95,10 +109,10 @@ class LinkPredict(nn.Module):
     def regularization_loss(self, embedding):
         return torch.mean(embedding.pow(2)) + torch.mean(self.w_relation.pow(2))
 
-    def get_loss(self, g, embed, triplets, labels):
+    def get_loss(self, g, h, embed, triplets, labels):
         # triplets is a list of data samples (positive and negative)
         # each row in the triplets is a 3-tuple of (source, relation, destination)
-        score = self.calc_score(g, embed, triplets)
+        score = self.calc_score(g, h, embed, triplets)
         predict_loss = F.binary_cross_entropy_with_logits(score, labels)
         reg_loss = self.regularization_loss(embed)
         return predict_loss + self.reg_param * reg_loss
@@ -112,18 +126,22 @@ def node_norm_to_edge_norm(g, node_norm):
 
 def main(args):
     # load graph data
-    #data = load_data(args.dataset)
-    num_nodes = 6884#data.num_nodes
-    # train_data = data.train
-    # valid_data = data.valid
-    # test_data = data.test
-    num_rels = 990#data.num_rels
-    train_data=pd.read_csv('../data/fb15k/toy/train.txt',sep='\t',names=['h','r','t'])
-    train_data=train_data.to_numpy()
-    valid_data=pd.read_csv('../data/fb15k/toy/valid.txt',sep='\t',names=['h','r','t'])
-    valid_data=valid_data.to_numpy()
-    test_data=pd.read_csv('../data/fb15k/toy/test.txt',sep='\t',names=['h','r','t'])
-    test_data=test_data.to_numpy()
+    if args.dataset is not None:
+        data = load_data(args.dataset)
+        num_nodes = data.num_nodes
+        num_rels = data.num_rels
+        train_data = data.train
+        valid_data = data.valid
+        test_data = data.test
+    else:
+        num_nodes = 6884#data.num_nodes
+        num_rels = 990#data.num_rels
+        train_data=pd.read_csv('../data/fb15k/toy/train.txt',sep='\t',names=['h','r','t'])
+        train_data=train_data.to_numpy()
+        valid_data=pd.read_csv('../data/fb15k/toy/valid.txt',sep='\t',names=['h','r','t'])
+        valid_data=valid_data.to_numpy()
+        test_data=pd.read_csv('../data/fb15k/toy/test.txt',sep='\t',names=['h','r','t'])
+        test_data=test_data.to_numpy()
     # check cuda
     use_cuda = args.gpu >= 0 and torch.cuda.is_available()
     if use_cuda:
@@ -137,7 +155,7 @@ def main(args):
                         num_hidden_layers=args.n_layers,
                         dropout=args.dropout,
                         use_cuda=use_cuda,
-                        reg_param=args.regularization,k_hops=args.k_hops)
+                        reg_param=args.regularization)
 
     # validation and testing triplets
     valid_data = torch.LongTensor(valid_data)
@@ -170,7 +188,9 @@ def main(args):
 
     epoch = 0
     best_mrr = 0
-    while True:
+    it=tqdm(range(args.n_epochs))
+    # while True:
+    for i in it:
         model.train()
         epoch += 1
 
@@ -196,7 +216,7 @@ def main(args):
 
         t0 = time.time()
         embed = model(g, node_id, edge_type, edge_norm)
-        loss = model.get_loss(g, embed, data, labels)
+        loss = model.get_loss(g, node_id, embed, data, labels)
         t1 = time.time()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_norm) # clip gradients
@@ -205,15 +225,15 @@ def main(args):
 
         forward_time.append(t1 - t0)
         backward_time.append(t2 - t1)
-        # print("Epoch {:04d} | Loss {:.4f} | Best MRR {:.4f} | Forward {:.4f}s | Backward {:.4f}s".
-        #       format(epoch, loss.item(), best_mrr, forward_time[-1], backward_time[-1]))
+        it.set_description("Epoch {:04d} | Loss {:.4f} |  Forward {:.4f}s | Backward {:.4f}s".
+              format(epoch, loss.item(), forward_time[-1], backward_time[-1]))
 
         optimizer.zero_grad()
 
         # validation
         if epoch % args.evaluate_every == 0:
-            print("Epoch {:04d} | Loss {:.4f} | Best MRR {:.4f} | Forward {:.4f}s | Backward {:.4f}s".
-              format(epoch, loss.item(), best_mrr, forward_time[-1], backward_time[-1]))
+            # print("Epoch {:04d} | Loss {:.4f} | Best MRR {:.4f} | Forward {:.4f}s | Backward {:.4f}s".
+            #   format(epoch, loss.item(), best_mrr, forward_time[-1], backward_time[-1]))
             # perform validation on CPU because full graph is too large
             if use_cuda:
                 model.cpu()
@@ -231,7 +251,7 @@ def main(args):
             #     best_mrr = mrr
             #     torch.save({'state_dict': model.state_dict(), 'epoch': epoch},
             #                model_state_file)
-            utils.hitat10(test_graph, embed, model.w_relation, test_data, args.eval_batch_size, model=model)
+            utils.hitat10(test_graph, test_node_id, embed, model.w_relation, test_data, args.eval_batch_size, model=model)
             if use_cuda:
                 model.cuda()
 
@@ -267,9 +287,9 @@ if __name__ == '__main__':
             help="number of propagation rounds")
     parser.add_argument("--n-epochs", type=int, default=6000,
             help="number of minimum training epochs")
-    parser.add_argument("-d", "--dataset", type=str, required=True,
+    parser.add_argument("-d", "--dataset", type=str, required=False,
             help="dataset to use")
-    parser.add_argument("--eval-batch-size", type=int, default=500,
+    parser.add_argument("--eval-batch-size", type=int, default=1,
             help="batch size when evaluating")
     parser.add_argument("--eval-protocol", type=str, default="filtered",
             help="type of evaluation protocol: 'raw' or 'filtered' mrr")
@@ -287,7 +307,7 @@ if __name__ == '__main__':
             help="perform evaluation every n epochs")
     parser.add_argument("--edge-sampler", type=str, default="uniform",
             help="type of edge sampler: 'uniform' or 'neighbor'")
-    parser.add_argument("--k-hops", type=int, default=3,
+    parser.add_argument("--max-subgraph-size", type=int, default=200,
             help="number of hops in enclosing subgraph")
 
     args = parser.parse_args()

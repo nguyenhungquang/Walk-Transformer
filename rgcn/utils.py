@@ -31,6 +31,16 @@ def neighbors(fringe, A, outgoing=True):
         res = set(A[:, list(fringe)].indices)
 
     return res
+
+def k_hop_neighbours(node, A, k):
+    fringe=node
+    visited=node
+    for i in range(k):
+        fringe=neighbors(fringe,A)
+        fringe=fringe-visited
+        visited=visited.union(fringe)
+    return fringe
+
 def k_hop_subgraph(src, dst, num_hops, A, sample_ratio=1.0, 
                    max_nodes_per_hop=None, node_features=None, 
                    y=1, directed=False, A_csc=None):
@@ -106,7 +116,7 @@ def sample_edge_neighborhood(adj_list, degrees, n_triplets, sample_size):
         seen[chosen_vertex] = True
 
         chosen_edge = np.random.choice(np.arange(chosen_adj_list.shape[0]))
-        chosen_edge = chosen_adj_list[chosen_edge]
+        chosen_edge = chosen_adj_list[chosen_efdge]
         edge_number = chosen_edge[0]
 
         while picked[edge_number]:
@@ -221,7 +231,7 @@ def negative_sampling(pos_samples, num_entity, negative_rate):
 #
 #######################################################################
 
-def hitat10(g, embedding, w, test, batch_size=1,model=None):
+def hitat10(g, h, embedding, w, test, batch_size=1,model=None):
     """ Perturb one element in the triplets
     """
     a=test[:,0]
@@ -244,7 +254,7 @@ def hitat10(g, embedding, w, test, batch_size=1,model=None):
         batch_r=batch_r.repeat_interleave(num_ent).unsqueeze(1)
         batch_ents=ents.repeat(b_size).unsqueeze(1)
         batch_input=torch.cat([batch_a,batch_r,batch_ents],dim=1)
-        score=model.calc_score(g, embedding,batch_input)
+        score=model.calc_score(g, h, embedding,batch_input)
         score=score.view(batch_size,-1)
         target = b[batch_start: batch_end].unsqueeze(1)
         rank=torch.argsort(score)
