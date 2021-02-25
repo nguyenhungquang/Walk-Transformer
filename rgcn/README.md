@@ -6,3 +6,4 @@
 - evaluate_every: evaluate sau mỗi k minibatch
 - n_epochs: số minibatch
 - lr: learning rate
+- -d: dataset, bỏ qua để dùng toydata
