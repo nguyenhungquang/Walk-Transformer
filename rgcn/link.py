@@ -10,7 +10,7 @@ Difference compared to MichSchli/RelationPrediction
   among immediate neighbors. User could specify "--edge-sampler=neighbor" to switch
   to neighbor-based edge sampling.
 """
-from tqdm import tqdm
+from tqdm.auto import tqdm
 import argparse
 import numpy as np
 import pickle
@@ -76,6 +76,7 @@ class LinkPredict(nn.Module):
         r=r.unsqueeze(1)
         o=o.unsqueeze(1)
         readout=readout.unsqueeze(1)
+        # readout=torch.zeros(s.shape).cuda()
         conv_input = torch.cat([s, r, o,readout], 1)
         out_conv= self.conv(conv_input)
         out_conv=self.activation(out_conv)
@@ -86,21 +87,24 @@ class LinkPredict(nn.Module):
     def subgraph_readout(self, g, h, embedding, src, tgt):
         adj=g.adjacency_matrix(scipy_fmt='csr')
         batch=[]
-        h=h.squeeze().cpu()
+        nodes=h.squeeze().cpu() #nodes in current minibatch graph
         batch_size=src.shape[0]
-        ind=torch.zeros(batch_size,args.max_subgraph_size,dtype=int)
+        ind=-torch.ones(batch_size,args.max_subgraph_size,dtype=int)
         i=0
         for s,t in zip(src,tgt):
             # nodes, _, _, _, _=utils.k_hop_subgraph(int(s),int(t),self.num_hops, adj)
-            nodes=list(neighbors[int(s)]&neighbors[int(t)])
-            nodes=np.intersect1d(nodes,h)
-            local_nodes=np.searchsorted(h,nodes)
-            # mean_emb=torch.mean(embedding[local_nodes],0)
-            # batch.append(mean_emb)
+            intersection=list(neighbors[int(s)]&neighbors[int(t)]) #intersect k-hop nb of src and tgt
+            subgraph=np.intersect1d(intersection,nodes) #nb of src and tgt in current minibatch graph
+            local_nodes=np.searchsorted(nodes,subgraph) #convert to current node id in current minibatch
             ind[i,:len(local_nodes)]=local_nodes
             i+=1
+        mask=ind<0
+        # print(embedding)
         subgraph_emb=embedding[ind]
-        readout_emb=subgraph_emb.sum(axis=1) / (subgraph_emb.sum(axis=2) > 0).sum(axis=1).view(-1,1).float()
+        subgraph_emb[mask,:]=0
+        denominator=(subgraph_emb.sum(axis=2) > 0).sum(axis=1).view(-1,1).float()
+        denominator[denominator==0]=1
+        readout_emb=subgraph_emb.sum(axis=1) / denominator
         return readout_emb
 
     def forward(self, g, h, r, norm):
@@ -134,6 +138,7 @@ def main(args):
         valid_data = data.valid
         test_data = data.test
     else:
+        print("toy dataset")
         num_nodes = 6884#data.num_nodes
         num_rels = 990#data.num_rels
         train_data=pd.read_csv('../data/fb15k/toy/train.txt',sep='\t',names=['h','r','t'])
@@ -214,6 +219,7 @@ def main(args):
             data, labels = data.cuda(), labels.cuda()
             g = g.to(args.gpu)
 
+        # with torch.autograd.detect_anomaly():
         t0 = time.time()
         embed = model(g, node_id, edge_type, edge_norm)
         loss = model.get_loss(g, node_id, embed, data, labels)
@@ -267,9 +273,9 @@ def main(args):
     model.eval()
     model.load_state_dict(checkpoint['state_dict'])
     print("Using best epoch: {}".format(checkpoint['epoch']))
-    embed = model(test_graph, test_node_id, test_rel, test_norm)
-    utils.calc_mrr(embed, model.w_relation, torch.LongTensor(train_data), valid_data,
-                   test_data, hits=[1, 3, 10], eval_bz=args.eval_batch_size, eval_p=args.eval_protocol)
+    # embed = model(test_graph, test_node_id, test_rel, test_norm)
+    # utils.calc_mrr(embed, model.w_relation, torch.LongTensor(train_data), valid_data,
+    #                test_data, hits=[1, 3, 10], eval_bz=args.eval_batch_size, eval_p=args.eval_protocol)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='RGCN')
