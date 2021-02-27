@@ -256,7 +256,6 @@ def hitat10(g, h, embedding, w, test, batch_size=1,model=None):
         batch_input=torch.cat([batch_a,batch_r,batch_ents],dim=1)
         score=model.calc_score(g, h, embedding,batch_input)
         score=score.view(batch_size,-1)
-        print(score)
         target = b[batch_start: batch_end].unsqueeze(1)
         rank=torch.argsort(score)
         # if target in rank[-10:]:

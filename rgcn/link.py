@@ -19,6 +19,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import random
+import scipy.sparse as scipy
 from dgl.data.knowledge_graph import load_data
 from dgl.nn.pytorch import RelGraphConv
 import pandas as pd
@@ -26,8 +27,8 @@ from model import BaseRGCN
 
 import utils
 max_nodes=180
-with open('3_neighbors.txt', 'rb') as handle:
-    neighbors = pickle.loads(handle.read())
+# with open('3_neighbors.txt', 'rb') as handle:
+#     neighbors = pickle.loads(handle.read())
     
 class EmbeddingLayer(nn.Module):
     def __init__(self, num_nodes, h_dim):
@@ -85,27 +86,51 @@ class LinkPredict(nn.Module):
         return -score
 
     def subgraph_readout(self, g, h, embedding, src, tgt):
-        adj=g.adjacency_matrix(scipy_fmt='csr')
-        batch=[]
-        nodes=h.squeeze().cpu() #nodes in current minibatch graph
-        batch_size=src.shape[0]
-        ind=-torch.ones(batch_size,args.max_subgraph_size,dtype=int)
-        i=0
-        for s,t in zip(src,tgt):
-            # nodes, _, _, _, _=utils.k_hop_subgraph(int(s),int(t),self.num_hops, adj)
-            intersection=list(neighbors[int(s)]&neighbors[int(t)]) #intersect k-hop nb of src and tgt
-            subgraph=np.intersect1d(intersection,nodes) #nb of src and tgt in current minibatch graph
-            local_nodes=np.searchsorted(nodes,subgraph) #convert to current node id in current minibatch
-            ind[i,:len(local_nodes)]=local_nodes
-            i+=1
+        adj=g.adj(scipy_fmt="coo")
+        l=adj.shape[0]
+        adj=torch.sparse.LongTensor(torch.LongTensor((adj.row,adj.col)).cuda(),torch.tensor(adj.data).cuda(),adj.shape).to_dense().float()
+        K=adj+torch.matrix_power(adj,2)+torch.matrix_power(adj,3)
+        edges=torch.vstack((src,tgt)).T
+        ind=(K[edges]>0).all(dim=1)
+        indices_mask=torch.vstack([torch.arange(1,l+1)]*ind.shape[0]).cuda()
+        ind=indices_mask*ind-1
+        ind=torch.sort(ind,1,descending=True)[0]
+        max_ind=max(torch.argmin(ind,dim=1))
+        ind=ind[:,:max_ind]
+
+        # batch_size=src.shape[0]
+        # ind=torch.ones(batch_size,args.max_subgraph_size,dtype=int)
         mask=ind<0
-        # print(embedding)
         subgraph_emb=embedding[ind]
         subgraph_emb[mask,:]=0
         denominator=(subgraph_emb.sum(axis=2) > 0).sum(axis=1).view(-1,1).float()
         denominator[denominator==0]=1
         readout_emb=subgraph_emb.sum(axis=1) / denominator
         return readout_emb
+
+    # def subgraph_readout(self, g, h, embedding, src, tgt):
+    #     adj=g.adjacency_matrix(scipy_fmt='csr')
+    #     batch=[]
+    #     nodes=h.squeeze().cpu() #nodes in current minibatch graph
+    #     print(nodes.shape)
+    #     batch_size=src.shape[0]
+    #     ind=-torch.ones(batch_size,args.max_subgraph_size,dtype=int)
+    #     i=0
+    #     # for s,t in zip(src,tgt):
+    #     #     # nodes, _, _, _, _=utils.k_hop_subgraph(int(s),int(t),self.num_hops, adj)
+    #     #     intersection=list(neighbors[int(s)]&neighbors[int(t)]&set(nodes)) #intersect k-hop nb of src and tgt
+    #     #     subgraph=np.intersect1d(intersection,nodes) #nb of src and tgt in current minibatch graph
+    #     #     local_nodes=np.searchsorted(nodes,subgraph) #convert to current node id in current minibatch
+    #     #     ind[i,:len(local_nodes)]=local_nodes
+    #     #     i+=1
+    #     mask=ind<0
+    #     # print(embedding)
+    #     subgraph_emb=embedding[ind]
+    #     subgraph_emb[mask,:]=0
+    #     denominator=(subgraph_emb.sum(axis=2) > 0).sum(axis=1).view(-1,1).float()
+    #     denominator[denominator==0]=1
+    #     readout_emb=subgraph_emb.sum(axis=1) / denominator
+    #     return readout_emb
 
     def forward(self, g, h, r, norm):
         return self.rgcn.forward(g, h, r, norm)
