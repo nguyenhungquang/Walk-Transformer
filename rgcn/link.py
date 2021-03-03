@@ -93,15 +93,19 @@ class LinkPredict(nn.Module):
         adj=torch.sparse.LongTensor(torch.LongTensor((adj.row,adj.col)).cuda(),torch.tensor(adj.data).cuda(),adj.shape).to_dense().float()
         K=torch.matrix_power(adj+torch.eye(adj.shape[0],device=torch.device("cuda")),3)
         edges=torch.stack((src,tgt)).T
-        ind=(K[edges]>0).any(dim=1) #all: intersection, any: union
+        ind=(K[edges]>0).all(dim=1) #all: intersection, any: union
         indices_mask=torch.stack([torch.arange(1,l+1)]*ind.shape[0]).cuda()
         # print(ind.shape,indices_mask.shape)
         ind=indices_mask*ind-1
         ind=torch.sort(ind,1,descending=True)[0]
         subgraph_id=ind[:,~(ind==-1).all(dim=0)]
-
+        
+        subgraph_id=subgraph_id.to(embedding.device)
         mask=subgraph_id<0
-        subgraph_emb=embedding[subgraph_id]*((~mask).unsqueeze(-1))
+        subgraph_id[subgraph_id==-1]=0
+        s=subgraph_id.shape
+        subgraph_emb=torch.index_select(embedding, 0, subgraph_id.flatten()).view(*s,-1)
+        subgraph_emb=subgraph_emb*((~mask).unsqueeze(-1))
         denominator=(~mask).sum(dim=1).unsqueeze(-1)
         denominator[denominator==0]+=1
         # print(denominator,(subgraph_emb.sum(axis=2) > 0).sum(axis=1).view(-1,1).float())
