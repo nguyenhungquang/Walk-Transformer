@@ -26,10 +26,12 @@ import pandas as pd
 from model import BaseRGCN
 
 import utils
-max_nodes=180
+from data_processing import *
 # with open('3_neighbors.txt', 'rb') as handle:
 #     neighbors = pickle.loads(handle.read())
-    
+
+import os
+os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 class EmbeddingLayer(nn.Module):
     def __init__(self, num_nodes, h_dim):
         super(EmbeddingLayer, self).__init__()
@@ -64,14 +66,14 @@ class LinkPredict(nn.Module):
         self.conv= nn.Conv1d(4, self.out_channels, 1)  # kernel size x 3
         self.activation = nn.Tanh() 
         self.fc_layer = nn.Linear(h_dim * self.out_channels, 1, bias=False)
-    def calc_score(self, g, h, embedding, triplets):
+    def calc_score(self, g, h, embedding, triplets, subgraph_id):
         # DistMult
         s = embedding[triplets[:,0]]
         r = self.w_relation[triplets[:,1]]
         o = embedding[triplets[:,2]]
         # score = torch.sum(s * r * o, dim=1)
         #subgraph readout
-        readout=self.subgraph_readout(g, h, embedding, triplets[:,0].squeeze(),triplets[:,2].squeeze())
+        readout=self.subgraph_readout(g, h, embedding, triplets[:,0].squeeze(),triplets[:,2].squeeze(), subgraph_id)
         #convkb
         s=s.unsqueeze(1)
         r=r.unsqueeze(1)
@@ -85,26 +87,13 @@ class LinkPredict(nn.Module):
         score = self.fc_layer(in_fc).view(-1)
         return -score
 
-    def subgraph_readout(self, g, h, embedding, src, tgt):
-        adj=g.adj(scipy_fmt="coo")
-        l=adj.shape[0]
-        adj=torch.sparse.LongTensor(torch.LongTensor((adj.row,adj.col)).cuda(),torch.tensor(adj.data).cuda(),adj.shape).to_dense().float()
-        K=adj+torch.matrix_power(adj,2)+torch.matrix_power(adj,3)
-        edges=torch.vstack((src,tgt)).T
-        ind=(K[edges]>0).all(dim=1)
-        indices_mask=torch.vstack([torch.arange(1,l+1)]*ind.shape[0]).cuda()
-        ind=indices_mask*ind-1
-        ind=torch.sort(ind,1,descending=True)[0]
-        max_ind=max(torch.argmin(ind,dim=1))
-        ind=ind[:,:max_ind]
-
-        # batch_size=src.shape[0]
-        # ind=torch.ones(batch_size,args.max_subgraph_size,dtype=int)
-        mask=ind<0
-        subgraph_emb=embedding[ind]
-        subgraph_emb[mask,:]=0
-        denominator=(subgraph_emb.sum(axis=2) > 0).sum(axis=1).view(-1,1).float()
-        denominator[denominator==0]=1
+    def subgraph_readout(self, g, h, embedding, src, tgt,subgraph_id):
+        subgraph_id=subgraph_id.cuda()    
+        mask=subgraph_id<0
+        subgraph_emb=embedding[subgraph_id]*((~mask).unsqueeze(-1))
+        denominator=(~mask).sum(dim=1).unsqueeze(-1)
+        denominator[denominator==0]+=1
+        # print(denominator,(subgraph_emb.sum(axis=2) > 0).sum(axis=1).view(-1,1).float())
         readout_emb=subgraph_emb.sum(axis=1) / denominator
         return readout_emb
 
@@ -112,17 +101,16 @@ class LinkPredict(nn.Module):
     #     adj=g.adjacency_matrix(scipy_fmt='csr')
     #     batch=[]
     #     nodes=h.squeeze().cpu() #nodes in current minibatch graph
-    #     print(nodes.shape)
     #     batch_size=src.shape[0]
     #     ind=-torch.ones(batch_size,args.max_subgraph_size,dtype=int)
     #     i=0
-    #     # for s,t in zip(src,tgt):
-    #     #     # nodes, _, _, _, _=utils.k_hop_subgraph(int(s),int(t),self.num_hops, adj)
-    #     #     intersection=list(neighbors[int(s)]&neighbors[int(t)]&set(nodes)) #intersect k-hop nb of src and tgt
-    #     #     subgraph=np.intersect1d(intersection,nodes) #nb of src and tgt in current minibatch graph
-    #     #     local_nodes=np.searchsorted(nodes,subgraph) #convert to current node id in current minibatch
-    #     #     ind[i,:len(local_nodes)]=local_nodes
-    #     #     i+=1
+    #     for s,t in zip(src,tgt):
+    #         # nodes, _, _, _, _=utils.k_hop_subgraph(int(s),int(t),self.num_hops, adj)
+    #         intersection=list(neighbors[int(s)]&neighbors[int(t)]&set(nodes)) #intersect k-hop nb of src and tgt
+    #         subgraph=np.intersect1d(intersection,nodes) #nb of src and tgt in current minibatch graph
+    #         local_nodes=np.searchsorted(nodes,subgraph) #convert to current node id in current minibatch
+    #         ind[i,:len(local_nodes)]=local_nodes
+    #         i+=1
     #     mask=ind<0
     #     # print(embedding)
     #     subgraph_emb=embedding[ind]
@@ -138,10 +126,10 @@ class LinkPredict(nn.Module):
     def regularization_loss(self, embedding):
         return torch.mean(embedding.pow(2)) + torch.mean(self.w_relation.pow(2))
 
-    def get_loss(self, g, h, embed, triplets, labels):
+    def get_loss(self, g, h, embed, triplets, labels, subgraph_id):
         # triplets is a list of data samples (positive and negative)
         # each row in the triplets is a 3-tuple of (source, relation, destination)
-        score = self.calc_score(g, h, embed, triplets)
+        score = self.calc_score(g, h, embed, triplets, subgraph_id)
         predict_loss = F.binary_cross_entropy_with_logits(score, labels)
         reg_loss = self.regularization_loss(embed)
         return predict_loss + self.reg_param * reg_loss
@@ -173,6 +161,7 @@ def main(args):
         test_data=pd.read_csv('../data/fb15k/toy/test.txt',sep='\t',names=['h','r','t'])
         test_data=test_data.to_numpy()
     # check cuda
+    
     use_cuda = args.gpu >= 0 and torch.cuda.is_available()
     if use_cuda:
         torch.cuda.set_device(args.gpu)
@@ -200,12 +189,18 @@ def main(args):
     test_rel = torch.from_numpy(test_rel)
     test_norm = node_norm_to_edge_norm(test_graph, torch.from_numpy(test_norm).view(-1, 1))
 
+    device=torch.device("cpu")
     if use_cuda:
         model.cuda()
+        device=torch.device("cuda:0")
 
     # build adj list and calculate degrees for sampling
     adj_list, degrees = utils.get_adj_and_degrees(num_nodes, train_data)
 
+    #data loader
+    train_dataset=KGData(train_data)
+    collate_fn = Batch(num_rels,adj_list,degrees, args.graph_split_size, args.negative_sample)
+    train_dataloader=DataLoader(train_data, batch_size=args.graph_batch_size, shuffle=True, collate_fn=collate_fn, num_workers=args.num_workers)
     # optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
@@ -223,43 +218,45 @@ def main(args):
     for i in it:
         model.train()
         epoch += 1
-
         # perform edge neighborhood sampling to generate training graph and data
-        g, node_id, edge_type, node_norm, data, labels = \
-            utils.generate_sampled_graph_and_labels(
-                train_data, args.graph_batch_size, args.graph_split_size,
-                num_rels, adj_list, degrees, args.negative_sample,
-                args.edge_sampler)
+        # g, node_id, edge_type, node_norm, data, labels = \
+        #     utils.generate_sampled_graph_and_labels(
+        #         train_data, args.graph_batch_size, args.graph_split_size,
+        #         num_rels, adj_list, degrees, args.negative_sample,
+        #         args.edge_sampler)
         # print("Done edge sampling")
-
         # set node/edge feature
-        node_id = torch.from_numpy(node_id).view(-1, 1).long()
-        edge_type = torch.from_numpy(edge_type)
-        edge_norm = node_norm_to_edge_norm(g, torch.from_numpy(node_norm).view(-1, 1))
-        data, labels = torch.from_numpy(data), torch.from_numpy(labels)
-        deg = g.in_degrees(range(g.number_of_nodes())).float().view(-1, 1)
-        if use_cuda:
-            node_id, deg = node_id.cuda(), deg.cuda()
-            edge_type, edge_norm = edge_type.cuda(), edge_norm.cuda()
-            data, labels = data.cuda(), labels.cuda()
-            g = g.to(args.gpu)
+        for g, node_id, edge_type, node_norm, data, labels, subgraph_id in train_dataloader:
+            node_id = torch.from_numpy(node_id).view(-1, 1).long()
+            edge_type = torch.from_numpy(edge_type)
+            edge_norm = node_norm_to_edge_norm(g, torch.from_numpy(node_norm).view(-1, 1))
+            data, labels = torch.from_numpy(data), torch.from_numpy(labels)
+            deg = g.in_degrees(range(g.number_of_nodes())).float().view(-1, 1)
+            if use_cuda:
+                node_id, deg = node_id.cuda(), deg.cuda()
+                edge_type, edge_norm = edge_type.cuda(), edge_norm.cuda()
+                data, labels = data.cuda(), labels.cuda()
+                g = g.to(args.gpu)
 
-        # with torch.autograd.detect_anomaly():
-        t0 = time.time()
-        embed = model(g, node_id, edge_type, edge_norm)
-        loss = model.get_loss(g, node_id, embed, data, labels)
-        t1 = time.time()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_norm) # clip gradients
-        optimizer.step()
-        t2 = time.time()
+            # with torch.autograd.detect_anomaly():
+            torch.cuda.synchronize()
+            t0 = time.time()
+            embed = model(g, node_id, edge_type, edge_norm)
+            loss = model.get_loss(g, node_id, embed, data, labels, subgraph_id)
+            torch.cuda.synchronize()
+            t1 = time.time()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_norm) # clip gradients
+            optimizer.step()
+            torch.cuda.synchronize()
+            t2 = time.time()
 
-        forward_time.append(t1 - t0)
-        backward_time.append(t2 - t1)
-        it.set_description("Epoch {:04d} | Loss {:.4f} |  Forward {:.4f}s | Backward {:.4f}s".
-              format(epoch, loss.item(), forward_time[-1], backward_time[-1]))
+            forward_time.append(t1 - t0)
+            backward_time.append(t2 - t1)
+            it.set_description("Epoch {:04d} | Loss {:.4f} |  Forward {:.4f}s | Backward {:.4f}s".
+                  format(epoch, loss.item(), forward_time[-1], backward_time[-1]))
 
-        optimizer.zero_grad()
+            optimizer.zero_grad()
 
         # validation
         if epoch % args.evaluate_every == 0:
@@ -292,12 +289,12 @@ def main(args):
 
     print("\nstart testing:")
     # use best model checkpoint
-    checkpoint = torch.load(model_state_file)
-    if use_cuda:
-        model.cpu() # test on CPU
-    model.eval()
-    model.load_state_dict(checkpoint['state_dict'])
-    print("Using best epoch: {}".format(checkpoint['epoch']))
+    # checkpoint = torch.load(model_state_file)
+    # if use_cuda:
+    #     model.cpu() # test on CPU
+    # model.eval()
+    # model.load_state_dict(checkpoint['state_dict'])
+    # print("Using best epoch: {}".format(checkpoint['epoch']))
     # embed = model(test_graph, test_node_id, test_rel, test_norm)
     # utils.calc_mrr(embed, model.w_relation, torch.LongTensor(train_data), valid_data,
     #                test_data, hits=[1, 3, 10], eval_bz=args.eval_batch_size, eval_p=args.eval_protocol)
@@ -340,6 +337,8 @@ if __name__ == '__main__':
             help="type of edge sampler: 'uniform' or 'neighbor'")
     parser.add_argument("--max-subgraph-size", type=int, default=200,
             help="number of hops in enclosing subgraph")
+    parser.add_argument("--num-workers", type=int, default=0,
+            help="number of workers")
 
     args = parser.parse_args()
     print(args)
