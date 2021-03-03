@@ -16,13 +16,13 @@ class Batch:
         self.negative_rate=negative_rate
         # self.device=device
     def __subgraph_index(self, g, data):
-        data=torch.from_numpy(data).cuda().T
+        data=torch.from_numpy(data).T.cuda()
         src=data[0]
         tgt=data[2]
         adj=g.adj(scipy_fmt="coo")
         l=adj.shape[0]
         adj=torch.sparse.LongTensor(torch.LongTensor((adj.row,adj.col)).cuda(),torch.tensor(adj.data).cuda(),adj.shape).to_dense().float()
-        K=torch.matrix_power(adj+torch.eye(adj.shape[0],device=torch.device("cuda:0")),3)
+        K=torch.matrix_power(adj+torch.eye(adj.shape[0],device=torch.device("cuda")),3)
         edges=torch.stack((src,tgt)).T
         ind=(K[edges]>0).any(dim=1) #all: intersection, any: union
         indices_mask=torch.stack([torch.arange(1,l+1)]*ind.shape[0]).cuda()
@@ -58,5 +58,5 @@ class Batch:
         # print("# sampled edges: {}".format(len(src) * 2))
         g, rel, norm = build_graph_from_triplets(len(uniq_v), self.num_rels,
                                                 (src, rel, dst))
-        subgraph_id= self.__subgraph_index(g, samples)
-        return g, uniq_v, rel, norm, samples, labels, subgraph_id
+        # subgraph_id= self.__subgraph_index(g, samples)
+        return g, uniq_v, rel, norm, samples, labels

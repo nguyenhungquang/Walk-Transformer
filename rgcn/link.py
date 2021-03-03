@@ -66,14 +66,14 @@ class LinkPredict(nn.Module):
         self.conv= nn.Conv1d(4, self.out_channels, 1)  # kernel size x 3
         self.activation = nn.Tanh() 
         self.fc_layer = nn.Linear(h_dim * self.out_channels, 1, bias=False)
-    def calc_score(self, g, h, embedding, triplets, subgraph_id):
+    def calc_score(self, g, h, embedding, triplets):
         # DistMult
         s = embedding[triplets[:,0]]
         r = self.w_relation[triplets[:,1]]
         o = embedding[triplets[:,2]]
         # score = torch.sum(s * r * o, dim=1)
         #subgraph readout
-        readout=self.subgraph_readout(g, h, embedding, triplets[:,0].squeeze(),triplets[:,2].squeeze(), subgraph_id)
+        readout=self.subgraph_readout(g, h, embedding, triplets[:,0].squeeze(),triplets[:,2].squeeze())
         #convkb
         s=s.unsqueeze(1)
         r=r.unsqueeze(1)
@@ -87,8 +87,19 @@ class LinkPredict(nn.Module):
         score = self.fc_layer(in_fc).view(-1)
         return -score
 
-    def subgraph_readout(self, g, h, embedding, src, tgt,subgraph_id):
-        subgraph_id=subgraph_id.cuda()    
+    def subgraph_readout(self, g, h, embedding, src, tgt):
+        adj=g.adj(scipy_fmt="coo")
+        l=adj.shape[0]
+        adj=torch.sparse.LongTensor(torch.LongTensor((adj.row,adj.col)).cuda(),torch.tensor(adj.data).cuda(),adj.shape).to_dense().float()
+        K=torch.matrix_power(adj+torch.eye(adj.shape[0],device=torch.device("cuda")),3)
+        edges=torch.stack((src,tgt)).T
+        ind=(K[edges]>0).any(dim=1) #all: intersection, any: union
+        indices_mask=torch.stack([torch.arange(1,l+1)]*ind.shape[0]).cuda()
+        # print(ind.shape,indices_mask.shape)
+        ind=indices_mask*ind-1
+        ind=torch.sort(ind,1,descending=True)[0]
+        subgraph_id=ind[:,~(ind==-1).all(dim=0)]
+
         mask=subgraph_id<0
         subgraph_emb=embedding[subgraph_id]*((~mask).unsqueeze(-1))
         denominator=(~mask).sum(dim=1).unsqueeze(-1)
@@ -126,10 +137,10 @@ class LinkPredict(nn.Module):
     def regularization_loss(self, embedding):
         return torch.mean(embedding.pow(2)) + torch.mean(self.w_relation.pow(2))
 
-    def get_loss(self, g, h, embed, triplets, labels, subgraph_id):
+    def get_loss(self, g, h, embed, triplets, labels):
         # triplets is a list of data samples (positive and negative)
         # each row in the triplets is a 3-tuple of (source, relation, destination)
-        score = self.calc_score(g, h, embed, triplets, subgraph_id)
+        score = self.calc_score(g, h, embed, triplets)
         predict_loss = F.binary_cross_entropy_with_logits(score, labels)
         reg_loss = self.regularization_loss(embed)
         return predict_loss + self.reg_param * reg_loss
@@ -226,7 +237,7 @@ def main(args):
         #         args.edge_sampler)
         # print("Done edge sampling")
         # set node/edge feature
-        for g, node_id, edge_type, node_norm, data, labels, subgraph_id in train_dataloader:
+        for g, node_id, edge_type, node_norm, data, labels in train_dataloader:
             node_id = torch.from_numpy(node_id).view(-1, 1).long()
             edge_type = torch.from_numpy(edge_type)
             edge_norm = node_norm_to_edge_norm(g, torch.from_numpy(node_norm).view(-1, 1))
@@ -242,7 +253,7 @@ def main(args):
             torch.cuda.synchronize()
             t0 = time.time()
             embed = model(g, node_id, edge_type, edge_norm)
-            loss = model.get_loss(g, node_id, embed, data, labels, subgraph_id)
+            loss = model.get_loss(g, node_id, embed, data, labels)
             torch.cuda.synchronize()
             t1 = time.time()
             loss.backward()
