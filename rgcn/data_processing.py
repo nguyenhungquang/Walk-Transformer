@@ -43,14 +43,13 @@ class Batch:
         tgt=data.transpose()[2]
         batch_size=data.shape[0]
         ind=-np.ones((batch_size,200))#,dtype=int)
-        i=0
-        for s,t in zip(src,tgt):
+        nodes_set = set(nodes)
+        for i, (s, t) in enumerate(zip(src,tgt)):
             # nodes, _, _, _, _=utils.k_hop_subgraph(int(s),int(t),self.num_hops, adj)
             subgraph=neighbors[int(s)]&neighbors[int(t)]#intersect k-hop nb of src and tgt
-            subgraph=list(subgraph&set(nodes))
+            subgraph=list(subgraph&nodes_set)
             local_nodes=np.searchsorted(nodes,subgraph) #convert to current node id in current minibatch
             ind[i,:len(local_nodes)]=local_nodes
-            i+=1
         return ind
     def __call__(self, data):
         t=time.time()
@@ -81,5 +80,5 @@ class Batch:
         g, rel, norm = build_graph_from_triplets(len(uniq_v), self.num_rels,
                                                 (src, rel, dst))
         subgraph_id= self.__subgraph_index_loop(g, samples, uniq_v)
-        print(time.time()-t)
+        # print(time.time()-t)
         return g, uniq_v, rel, norm, samples, labels, subgraph_id

@@ -355,7 +355,7 @@ if __name__ == '__main__':
             help="type of edge sampler: 'uniform' or 'neighbor'")
     parser.add_argument("--max-subgraph-size", type=int, default=200,
             help="number of hops in enclosing subgraph")
-    parser.add_argument("--num-workers", type=int, default=0,
+    parser.add_argument("--num-workers", type=int, default=1,
             help="number of workers")
 
     args = parser.parse_args()
