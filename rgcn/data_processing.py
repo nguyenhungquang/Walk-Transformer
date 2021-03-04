@@ -1,5 +1,10 @@
 from utils import *
+import pickle 
+import time
+import numpy as np
 from torch.utils.data import Dataset, DataLoader
+with open('3_neighbors.txt', 'rb') as handle:
+    neighbors = pickle.loads(handle.read())
 class KGData(Dataset):
     def __init__(self,data):
         self.data=data
@@ -31,7 +36,24 @@ class Batch:
         ind=torch.sort(ind,1,descending=True)[0]
         ind=ind[:,~(ind==-1).all(dim=0)]
         return ind
+    def __subgraph_index_loop(self, g, data, nodes):
+        adj=g.adjacency_matrix(scipy_fmt='csr')
+        batch=[]
+        src=data.transpose()[0]
+        tgt=data.transpose()[2]
+        batch_size=data.shape[0]
+        ind=-np.ones((batch_size,200))#,dtype=int)
+        i=0
+        for s,t in zip(src,tgt):
+            # nodes, _, _, _, _=utils.k_hop_subgraph(int(s),int(t),self.num_hops, adj)
+            subgraph=neighbors[int(s)]&neighbors[int(t)]#intersect k-hop nb of src and tgt
+            subgraph=list(subgraph&set(nodes))
+            local_nodes=np.searchsorted(nodes,subgraph) #convert to current node id in current minibatch
+            ind[i,:len(local_nodes)]=local_nodes
+            i+=1
+        return ind
     def __call__(self, data):
+        t=time.time()
         edges=np.stack(data)#.to(self.device)
         length=edges.shape[0]
         src, rel, dst = edges.transpose()
@@ -58,5 +80,6 @@ class Batch:
         # print("# sampled edges: {}".format(len(src) * 2))
         g, rel, norm = build_graph_from_triplets(len(uniq_v), self.num_rels,
                                                 (src, rel, dst))
-        # subgraph_id= self.__subgraph_index(g, samples)
-        return g, uniq_v, rel, norm, samples, labels
+        subgraph_id= self.__subgraph_index_loop(g, samples, uniq_v)
+        print(time.time()-t)
+        return g, uniq_v, rel, norm, samples, labels, subgraph_id

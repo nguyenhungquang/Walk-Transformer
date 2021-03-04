@@ -30,8 +30,8 @@ from data_processing import *
 # with open('3_neighbors.txt', 'rb') as handle:
 #     neighbors = pickle.loads(handle.read())
 
-import os
-os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
+# import os
+# os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 class EmbeddingLayer(nn.Module):
     def __init__(self, num_nodes, h_dim):
         super(EmbeddingLayer, self).__init__()
@@ -66,14 +66,14 @@ class LinkPredict(nn.Module):
         self.conv= nn.Conv1d(4, self.out_channels, 1)  # kernel size x 3
         self.activation = nn.Tanh() 
         self.fc_layer = nn.Linear(h_dim * self.out_channels, 1, bias=False)
-    def calc_score(self, g, h, embedding, triplets):
+    def calc_score(self, g, h, embedding, triplets, subgraph_id):
         # DistMult
         s = embedding[triplets[:,0]]
         r = self.w_relation[triplets[:,1]]
         o = embedding[triplets[:,2]]
         # score = torch.sum(s * r * o, dim=1)
         #subgraph readout
-        readout=self.subgraph_readout(g, h, embedding, triplets[:,0].squeeze(),triplets[:,2].squeeze())
+        readout=self.subgraph_readout(g, h, embedding, triplets[:,0].squeeze(),triplets[:,2].squeeze(), subgraph_id)
         #convkb
         s=s.unsqueeze(1)
         r=r.unsqueeze(1)
@@ -87,20 +87,20 @@ class LinkPredict(nn.Module):
         score = self.fc_layer(in_fc).view(-1)
         return -score
 
-    def subgraph_readout(self, g, h, embedding, src, tgt):
-        adj=g.adj(scipy_fmt="coo")
-        l=adj.shape[0]
-        adj=torch.sparse.LongTensor(torch.LongTensor((adj.row,adj.col)).cuda(),torch.tensor(adj.data).cuda(),adj.shape).to_dense().float()
-        K=torch.matrix_power(adj+torch.eye(adj.shape[0],device=torch.device("cuda")),3)
-        edges=torch.stack((src,tgt)).T
-        ind=(K[edges]>0).all(dim=1) #all: intersection, any: union
-        indices_mask=torch.stack([torch.arange(1,l+1)]*ind.shape[0]).cuda()
-        # print(ind.shape,indices_mask.shape)
-        ind=indices_mask*ind-1
-        ind=torch.sort(ind,1,descending=True)[0]
-        subgraph_id=ind[:,~(ind==-1).all(dim=0)]
+    def subgraph_readout(self, g, h, embedding, src, tgt, subgraph_id):
+        # adj=g.adj(scipy_fmt="coo")
+        # l=adj.shape[0]
+        # adj=torch.sparse.LongTensor(torch.LongTensor((adj.row,adj.col)).cuda(),torch.tensor(adj.data).cuda(),adj.shape).to_dense().float()
+        # K=torch.matrix_power(adj+torch.eye(adj.shape[0],device=torch.device("cuda")),3)
+        # edges=torch.stack((src,tgt)).T
+        # ind=(K[edges]>0).all(dim=1) #all: intersection, any: union
+        # indices_mask=torch.stack([torch.arange(1,l+1)]*ind.shape[0]).cuda()
+        # # print(ind.shape,indices_mask.shape)
+        # ind=indices_mask*ind-1
+        # ind=torch.sort(ind,1,descending=True)[0]
+        # subgraph_id=ind[:,~(ind==-1).all(dim=0)]
         
-        subgraph_id=subgraph_id.to(embedding.device)
+        subgraph_id=torch.tensor(subgraph_id).to(embedding.device).long()
         mask=subgraph_id<0
         subgraph_id[subgraph_id==-1]=0
         s=subgraph_id.shape
@@ -141,10 +141,10 @@ class LinkPredict(nn.Module):
     def regularization_loss(self, embedding):
         return torch.mean(embedding.pow(2)) + torch.mean(self.w_relation.pow(2))
 
-    def get_loss(self, g, h, embed, triplets, labels):
+    def get_loss(self, g, h, embed, triplets, labels, subgraph_id):
         # triplets is a list of data samples (positive and negative)
         # each row in the triplets is a 3-tuple of (source, relation, destination)
-        score = self.calc_score(g, h, embed, triplets)
+        score = self.calc_score(g, h, embed, triplets, subgraph_id)
         predict_loss = F.binary_cross_entropy_with_logits(score, labels)
         reg_loss = self.regularization_loss(embed)
         return predict_loss + self.reg_param * reg_loss
@@ -215,7 +215,7 @@ def main(args):
     #data loader
     train_dataset=KGData(train_data)
     collate_fn = Batch(num_rels,adj_list,degrees, args.graph_split_size, args.negative_sample)
-    train_dataloader=DataLoader(train_data, batch_size=args.graph_batch_size, shuffle=True, collate_fn=collate_fn, num_workers=args.num_workers)
+    train_dataloader=DataLoader(train_data, batch_size=args.graph_batch_size, shuffle=True, collate_fn=collate_fn, num_workers=args.num_workers, pin_memory=True)
     # optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
@@ -230,6 +230,7 @@ def main(args):
     best_mrr = 0
     it=tqdm(range(args.n_epochs))
     # while True:
+    t=time.time()
     for i in it:
         model.train()
         epoch += 1
@@ -241,7 +242,8 @@ def main(args):
         #         args.edge_sampler)
         # print("Done edge sampling")
         # set node/edge feature
-        for g, node_id, edge_type, node_norm, data, labels in train_dataloader:
+        t=time.time()
+        for g, node_id, edge_type, node_norm, data, labels, subgraph_id in train_dataloader:
             node_id = torch.from_numpy(node_id).view(-1, 1).long()
             edge_type = torch.from_numpy(edge_type)
             edge_norm = node_norm_to_edge_norm(g, torch.from_numpy(node_norm).view(-1, 1))
@@ -257,7 +259,7 @@ def main(args):
             torch.cuda.synchronize()
             t0 = time.time()
             embed = model(g, node_id, edge_type, edge_norm)
-            loss = model.get_loss(g, node_id, embed, data, labels)
+            loss = model.get_loss(g, node_id, embed, data, labels, subgraph_id)
             torch.cuda.synchronize()
             t1 = time.time()
             loss.backward()
@@ -272,9 +274,9 @@ def main(args):
                   format(epoch, loss.item(), forward_time[-1], backward_time[-1]))
 
             optimizer.zero_grad()
-
+        print("Total time per epoch ", time.time()-t)
         # validation
-        if epoch % args.evaluate_every == 0:
+        if False:#epoch % args.evaluate_every == 0:
             # print("Epoch {:04d} | Loss {:.4f} | Best MRR {:.4f} | Forward {:.4f}s | Backward {:.4f}s".
             #   format(epoch, loss.item(), best_mrr, forward_time[-1], backward_time[-1]))
             # perform validation on CPU because full graph is too large
@@ -315,6 +317,7 @@ def main(args):
     #                test_data, hits=[1, 3, 10], eval_bz=args.eval_batch_size, eval_p=args.eval_protocol)
 
 if __name__ == '__main__':
+    torch.multiprocessing.set_start_method('spawn')
     parser = argparse.ArgumentParser(description='RGCN')
     parser.add_argument("--dropout", type=float, default=0.2,
             help="dropout probability")
